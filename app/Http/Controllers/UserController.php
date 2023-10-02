@@ -2,15 +2,96 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\OurExampleEvent;
+use App\Models\Follow;
+use App\Models\Post;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Illuminate\Support\Facades\View;
+use Intervention\Image\Facades\Image;
 
 class UserController extends Controller
 {
 
 
+
+    public function storeAvatar(Request $request) {
+       $request->validate([
+           'avatar' => 'required|image|max:3000'
+       ]);
+
+       $user = auth()->user();
+
+       $filename = $user->id . '-' . uniqid() . '.jpg';
+
+       $imgData = Image::make($request->file('avatar'))->fit(120)->encode('jpg');
+       Storage::put('public/avatar/' . $filename, $imgData);
+
+       $oldAvatar = $user->avatar;
+
+        $user->avatar = $filename;
+        $user->save();
+
+        if ($oldAvatar != "/fallback-avatar.jpg") {
+            Storage::delete(str_replace("/storage", "public/", $oldAvatar));
+        }
+
+        return back()->with('success', 'Congrats with the new avatar!');
+    }
+
+
+    public function showAvatarForm() {
+        return view('avatar-form');
+    }
+
+
+    private function getSharedData($user) {
+        $currentFollowing = 0;
+        if (auth()->check()) {
+            $currentFollowing = Follow::where([['user_id', '=', auth()->user()->id], ['followeduser', '=', $user->id]])->count();
+        }
+
+        View::share('sharedData', ['currentlyFollowing' => $currentFollowing, 'avatar' => $user->avatar, 'username' => $user->username, 'postCount' => $user->posts()->count(), 'followerCount' => $user->followers()->count(), 'followingCount' => $user->followingTheseUsers()->count()]);
+    }
+
+
+    public function profile(User $user) {
+        $this->getSharedData($user);
+        return view('profile-posts', ['posts' => $user->posts()->latest()->get()]);
+    }
+
+
+    public function profileRaw(User $user) {
+        return response()->json(['theHTML' => \view('profile-posts-only', ['posts' => $user->posts()->latest()->get()])->render(), 'docTitle' => $user->username . "'s Profile"]);
+    }
+
+    public function profileFollowers(User $user) {
+        $this->getSharedData($user);
+        return view('profile-followers', ['followers' => $user->followers()->latest()->get()]);
+    }
+
+
+    public function profileFollowersRaw(User $user) {
+        return response()->json(['theHTML' => \view('profile-followers-only', ['followers' => $user->followers()->latest()->get()])->render(), 'docTitle' => $user->username . "'s Followers"]);
+
+    }
+
+
+    public function profileFollowing(User $user) {
+        $this->getSharedData($user);
+        return view('profile-following', ['following' => $user->followingTheseUsers()->latest()->get()]);
+    }
+
+
+    public function profileFollowingRaw(User $user) {
+        return response()->json(['theHTML' => \view('profile-following-only', ['following' => $user->followingTheseUsers()->latest()->get()])->render(), 'docTitle' => 'Who' . $user->username . " Follows"]);
+    }
+
     public function logout() {
+        event(new OurExampleEvent(['username' => auth()->user()->username, 'action' => 'logout']));
         auth()->logout();
         return redirect('/')->with('success', 'You have successfully logged out!');
     }
@@ -18,12 +99,30 @@ class UserController extends Controller
 
     public function showCorrectHomepage() {
         if(auth()->check()) {
-            return view('homepage-feed');
+            return view('homepage-feed', ['posts' => auth()->user()->feedPosts()->latest()->paginate(3)]);
         } else {
-            return view('homepage');
+            $postCount = Cache::remember('postCount', 20, function () {
+                sleep(5);
+                return Post::count();
+            });
+            return view('homepage', ['postCount' => $postCount]);
         }
     }
 
+
+    public function loginApi(Request $request) {
+        $incomingFields = $request->validate([
+            'username' => 'required',
+            'password' => 'required'
+        ]);
+
+        if (auth()->attempt($incomingFields)) {
+            $user = User::where('username', $incomingFields['username'])->first();
+            $token = $user->createToken('outapptoken')->plainTextToken;
+            return $token;
+        }
+        return 'SORRY';
+    }
     public function login(Request $request) {
         $incomingFields = $request->validate([
            'loginusername' => 'required',
@@ -35,6 +134,7 @@ class UserController extends Controller
             //If the user login with the right credentials, give him a session value
             //stored in a cookie, so the server can trust that the visitor is who they proved they are
             $request->session()->regenerate();
+            event(new OurExampleEvent(['username' => auth()->user()->username, 'action' => 'login']));
             return redirect('/')->with('success','You have successfully logged in!');
         } else {
             return redirect('/')->with('failure', 'Invalid log in.');
